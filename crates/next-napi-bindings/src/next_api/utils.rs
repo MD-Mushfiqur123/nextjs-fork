@@ -111,8 +111,8 @@ pub fn root_task_dispose(
 pub async fn get_issues<T: Send>(
     source: OperationVc<T>,
     filter: Vc<IssueFilter>,
-) -> Result<Arc<Vec<ReadRef<PlainIssue>>>> {
-    Ok(Arc::new(
+) -> Result<Arc<[ReadRef<PlainIssue>]>> {
+    Ok(Arc::from(
         source.peek_issues().get_plain_issues(filter).await?,
     ))
 }
@@ -124,7 +124,7 @@ pub async fn get_issues<T: Send>(
 /// [consume]: turbo_tasks::CollectiblesSource::take_collectibles
 pub async fn get_diagnostics<T: Send>(
     source: OperationVc<T>,
-) -> Result<Arc<Vec<ReadRef<PlainDiagnostic>>>> {
+) -> Result<Arc<[ReadRef<PlainDiagnostic>]>> {
     let captured_diags = source.peek_diagnostics().await?;
     let mut diags = captured_diags
         .diagnostics
@@ -135,7 +135,7 @@ pub async fn get_diagnostics<T: Send>(
 
     diags.sort();
 
-    Ok(Arc::new(diags))
+    Ok(Arc::from(diags))
 }
 
 /// Returns true if the file path refers to a Next.js/React internal file whose
@@ -482,8 +482,8 @@ pub async fn strongly_consistent_catch_collectables<R: VcValueType + Send>(
     filter: Vc<IssueFilter>,
 ) -> Result<(
     Option<ReadRef<R>>,
-    Arc<Vec<ReadRef<PlainIssue>>>,
-    Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    Arc<[ReadRef<PlainIssue>]>,
+    Arc<[ReadRef<PlainDiagnostic>]>,
     Arc<Effects>,
 )> {
     let result = source_op.read_strongly_consistent().await;

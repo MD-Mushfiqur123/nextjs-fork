@@ -14,10 +14,11 @@ use next_api::{
 };
 use tracing::Instrument;
 use turbo_rcstr::RcStr;
-use turbo_tasks::{Completion, Effects, OperationVc, ReadRef, Vc};
+use turbo_tasks::{Completion, Effects, OperationVc, ReadRef, ResolvedVc, Vc};
 use turbopack_core::{
     diagnostics::PlainDiagnostic,
-    issue::{IssueFilter, PlainIssue},
+    effect::apply_effects_with_plain_issues,
+    issue::{IssueFilter, PlainIssue, extend_issues},
 };
 
 use crate::next_api::utils::{
@@ -106,21 +107,22 @@ impl Deref for ExternalEndpoint {
 /// `OperationVc<OptionEndpoint>` and extracting ignore rules from its config.
 async fn issue_filter_from_endpoint(
     endpoint_op: OperationVc<OptionEndpoint>,
-) -> Result<Vc<IssueFilter>> {
+) -> Result<ResolvedVc<IssueFilter>> {
     let endpoint_option = endpoint_op.connect().await?;
     if let Some(ep) = &*endpoint_option {
-        Ok(ep.project().issue_filter())
+        ep.project().issue_filter().to_resolved().await
     } else {
-        Ok(IssueFilter::warnings_and_foreign_errors().cell())
+        Ok(IssueFilter::warnings_and_foreign_errors().resolved_cell())
     }
 }
 
 #[turbo_tasks::value(serialization = "skip")]
 struct WrittenEndpointWithIssues {
     written: Option<ReadRef<EndpointOutputPaths>>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[turbo_tasks::function(operation)]
@@ -130,12 +132,13 @@ async fn get_written_endpoint_with_issues_operation(
     let write_to_disk_op = endpoint_write_to_disk_operation(endpoint_op);
     let filter = issue_filter_from_endpoint(endpoint_op).await?;
     let (written, issues, diagnostics, effects) =
-        strongly_consistent_catch_collectables(write_to_disk_op, filter).await?;
+        strongly_consistent_catch_collectables(write_to_disk_op, *filter).await?;
     Ok(WrittenEndpointWithIssues {
         written,
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -158,12 +161,14 @@ pub async fn endpoint_write_to_disk(
                 issues,
                 diagnostics,
                 effects,
+                filter,
             } = &*written_entrypoint_with_issues_op
                 .read_strongly_consistent()
                 .await?;
-            effects.apply().await?;
+            let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+            let issues = extend_issues(issues, &effect_plain_issues);
 
-            Ok((written.clone(), issues.clone(), diagnostics.clone()))
+            Ok((written.clone(), issues, diagnostics.clone()))
         })
         .or_else(|e| ctx.throw_turbopack_internal_result(&e.into()))
         .await?;
@@ -190,18 +195,15 @@ pub fn endpoint_server_changed_subscribe(
             async move {
                 let issues_and_diags_op = subscribe_issues_and_diags_operation(endpoint, issues);
                 let result = issues_and_diags_op.read_strongly_consistent().await?;
-                result.effects.apply().await?;
-                Ok(result)
+                let effect_plain_issues =
+                    apply_effects_with_plain_issues(&result.effects, result.filter).await?;
+                let issues = extend_issues(&result.issues, &effect_plain_issues);
+                Ok((issues, result.diagnostics.clone()))
             }
             .instrument(tracing::info_span!("server changes subscription"))
         },
         |ctx| {
-            let EndpointIssuesAndDiags {
-                changed: _,
-                issues,
-                diagnostics,
-                effects: _,
-            } = &*ctx.value;
+            let (issues, diagnostics) = &ctx.value;
 
             Ok(vec![TurbopackResult {
                 result: (),
@@ -218,9 +220,10 @@ pub fn endpoint_server_changed_subscribe(
 #[turbo_tasks::value(shared, serialization = "skip", eq = "manual")]
 struct EndpointIssuesAndDiags {
     changed: Option<ReadRef<Completion>>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 impl PartialEq for EndpointIssuesAndDiags {
@@ -246,21 +249,24 @@ async fn subscribe_issues_and_diags_operation(
     if should_include_issues {
         let filter = issue_filter_from_endpoint(endpoint_op).await?;
         let (changed_value, issues, diagnostics, effects) =
-            strongly_consistent_catch_collectables(changed_op, filter).await?;
+            strongly_consistent_catch_collectables(changed_op, *filter).await?;
         Ok(EndpointIssuesAndDiags {
             changed: changed_value,
             issues,
             diagnostics,
             effects,
+            filter,
         }
         .cell())
     } else {
+        let filter = issue_filter_from_endpoint(endpoint_op).await?;
         let changed_value = changed_op.read_strongly_consistent().await?;
         Ok(EndpointIssuesAndDiags {
             changed: Some(changed_value),
-            issues: Arc::new(vec![]),
-            diagnostics: Arc::new(vec![]),
+            issues: Arc::from([]),
+            diagnostics: Arc::from([]),
             effects: Arc::new(Effects::default()),
+            filter,
         }
         .cell())
     }

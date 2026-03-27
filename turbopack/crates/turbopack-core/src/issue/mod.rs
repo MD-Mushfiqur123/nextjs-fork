@@ -7,6 +7,7 @@ pub mod resolve;
 use std::{
     cmp::min,
     fmt::{Display, Formatter},
+    sync::Arc,
 };
 
 use anyhow::{Result, bail};
@@ -238,9 +239,6 @@ where
         emit(ResolvedVc::upcast_non_strict::<Box<dyn Issue>>(self));
     }
 }
-
-#[turbo_tasks::value(transparent)]
-pub struct Issues(Vec<ResolvedVc<Box<dyn Issue>>>);
 
 /// A pattern that can match by exact string, glob, or regex.
 #[derive(Clone, Debug, PartialEq, Eq, TraceRawVcs, NonLocalValue, Encode, Decode)]
@@ -1105,6 +1103,31 @@ where
     fn drop_issues(self) {
         self.drop_collectibles::<Box<dyn Issue>>();
     }
+}
+
+/// Extends a sorted issue list returned by [`CapturedIssues::get_plain_issues`].
+pub fn extend_issues(
+    base: &Arc<[ReadRef<PlainIssue>]>,
+    other: &[ReadRef<PlainIssue>],
+) -> Arc<[ReadRef<PlainIssue>]> {
+    debug_assert!(
+        base.is_sorted(),
+        "extend_issues must be called with a sorted base list of issues"
+    );
+    // optimization: Return the given arc if the other one is empty
+    if other.is_empty() {
+        return base.clone();
+    }
+    if base.is_empty() {
+        let mut sorted = Box::<[_]>::from(other);
+        sorted.sort();
+        return Arc::from(sorted);
+    }
+    let mut extended = Vec::with_capacity(base.len() + other.len());
+    extended.extend_from_slice(base);
+    extended.extend_from_slice(other);
+    extended.sort();
+    Arc::from(extended)
 }
 
 /// A helper function to print out issues to the console.

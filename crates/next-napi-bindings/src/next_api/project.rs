@@ -62,12 +62,15 @@ use turbo_unix_path::{get_relative_path_to, sys_to_unix, unix_to_sys};
 use turbopack_core::{
     PROJECT_FILESYSTEM_NAME, SOURCE_URL_PROTOCOL,
     diagnostics::PlainDiagnostic,
-    issue::{IssueFilter, PlainIssue},
+    effect::apply_effects_with_plain_issues,
+    issue::{IssueFilter, PlainIssue, extend_issues},
     output::{OutputAsset, OutputAssets},
     source_map::{SourceMap, Token},
     version::{PartialUpdate, TotalUpdate, Update, VersionState},
 };
-use turbopack_ecmascript_hmr_protocol::{ClientUpdateInstruction, Issue, ResourceIdentifier};
+use turbopack_ecmascript_hmr_protocol::{
+    ClientUpdateInstruction, Issue as HmrIssue, ResourceIdentifier,
+};
 use turbopack_trace_utils::{
     exit::{ExitHandler, ExitReceiver},
     filter_layer::FilterLayer,
@@ -98,11 +101,6 @@ const SLOW_FILESYSTEM_THRESHOLD: Duration = Duration::from_millis(200);
 static SOURCE_MAP_PREFIX: LazyLock<String> = LazyLock::new(|| format!("{SOURCE_URL_PROTOCOL}///"));
 static SOURCE_MAP_PREFIX_PROJECT: LazyLock<String> =
     LazyLock::new(|| format!("{SOURCE_URL_PROTOCOL}///[{PROJECT_FILESYSTEM_NAME}]/"));
-
-/// Get the `Vc<IssueFilter>` for a `ProjectContainer`.
-fn issue_filter_from_container(container: ResolvedVc<ProjectContainer>) -> Vc<IssueFilter> {
-    container.project().issue_filter()
-}
 
 #[napi(object)]
 #[derive(Clone, Debug)]
@@ -991,9 +989,10 @@ impl NapiEntrypoints {
 #[turbo_tasks::value(serialization = "skip")]
 struct EntrypointsWithIssues {
     entrypoints: Option<ReadRef<EntrypointsOperation>>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[turbo_tasks::function(operation)]
@@ -1002,14 +1001,16 @@ async fn get_entrypoints_with_issues_operation(
 ) -> Result<Vc<EntrypointsWithIssues>> {
     let entrypoints_operation =
         EntrypointsOperation::new(project_container_entrypoints_operation(container));
-    let filter = issue_filter_from_container(container);
+    let filter = container.project().issue_filter();
     let (entrypoints, issues, diagnostics, effects) =
         strongly_consistent_catch_collectables(entrypoints_operation, filter).await?;
+    let filter = filter.to_resolved().await?;
     Ok(EntrypointsWithIssues {
         entrypoints,
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -1025,17 +1026,19 @@ fn project_container_entrypoints_operation(
 
 #[turbo_tasks::value(serialization = "skip")]
 struct OperationResult {
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[turbo_tasks::value(serialization = "skip")]
 struct AllWrittenEntrypointsWithIssues {
     entrypoints: Option<ReadRef<EntrypointsOperation>>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[napi(object)]
@@ -1434,16 +1437,18 @@ pub async fn project_write_all_entrypoints_to_disk(
                 issues,
                 diagnostics,
                 effects,
+                filter,
             } = &*entrypoints_with_issues_op
                 .read_strongly_consistent()
                 .await?;
 
             // Apply phase side effects. Asset emission is performed once at the end.
-            effects.apply().await?;
+            let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+            let issues = extend_issues(issues, &effect_plain_issues);
 
             Ok((
                 entrypoints.clone(),
-                issues.iter().cloned().collect::<Vec<_>>(),
+                issues,
                 diagnostics.iter().cloned().collect::<Vec<_>>(),
             ))
         })
@@ -1500,16 +1505,18 @@ pub async fn project_write_all_entrypoints_to_disk(
                     issues,
                     diagnostics,
                     effects,
+                    filter,
                 } = &*entrypoints_with_issues_op
                     .read_strongly_consistent()
                     .await?;
 
                 // Apply phase side effects. Asset emission is performed once at the end.
-                effects.apply().await?;
+                let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+                let issues = extend_issues(issues, &effect_plain_issues);
 
                 Ok((
                     entrypoints.clone(),
-                    issues.iter().cloned().collect::<Vec<_>>(),
+                    issues,
                     diagnostics.iter().cloned().collect::<Vec<_>>(),
                 ))
             })
@@ -1519,7 +1526,7 @@ pub async fn project_write_all_entrypoints_to_disk(
         if deferred_entrypoints.is_some() {
             entrypoints = deferred_entrypoints;
         }
-        issues.extend(deferred_issues);
+        issues = extend_issues(&issues, &deferred_issues);
         diags.extend(deferred_diags);
     }
 
@@ -1534,19 +1541,18 @@ pub async fn project_write_all_entrypoints_to_disk(
                 issues,
                 diagnostics,
                 effects,
+                filter,
             } = &*emit_result_op.read_strongly_consistent().await?;
 
-            effects.apply().await?;
+            let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+            let issues = extend_issues(issues, &effect_plain_issues);
 
-            Ok((
-                issues.iter().cloned().collect::<Vec<_>>(),
-                diagnostics.iter().cloned().collect::<Vec<_>>(),
-            ))
+            Ok((issues, diagnostics.iter().cloned().collect::<Vec<_>>()))
         })
         .or_else(|e| ctx.throw_turbopack_internal_result(&e.into()))
         .await?;
 
-    issues.extend(emit_issues);
+    issues = extend_issues(&issues, &emit_issues);
     diags.extend(emit_diags);
 
     Ok(TurbopackResult {
@@ -1574,14 +1580,16 @@ async fn get_all_written_entrypoints_with_issues_operation(
         app_dir_only,
         write_phase,
     ));
-    let filter = issue_filter_from_container(container);
+    let filter = container.project().issue_filter();
     let (entrypoints, issues, diagnostics, effects) =
         strongly_consistent_catch_collectables(entrypoints_operation, filter).await?;
+    let filter = filter.to_resolved().await?;
     Ok(AllWrittenEntrypointsWithIssues {
         entrypoints,
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -1658,14 +1666,16 @@ async fn emit_all_output_assets_once_with_issues_operation(
         app_dir_only,
         has_deferred_entrypoints,
     ));
-    let filter = issue_filter_from_container(container);
+    let filter = container.project().issue_filter();
     let (_, issues, diagnostics, effects) =
         strongly_consistent_catch_collectables(entrypoints_operation, filter).await?;
+    let filter = filter.to_resolved().await?;
 
     Ok(OperationResult {
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -1749,6 +1759,7 @@ pub async fn project_entrypoints(
                 issues,
                 diagnostics,
                 effects: _,
+                filter: _,
             } = &*entrypoints_with_issues_op
                 .read_strongly_consistent()
                 .await?;
@@ -1792,12 +1803,14 @@ pub fn project_entrypoints_subscribe(
                     issues,
                     diagnostics,
                     effects,
+                    filter,
                 } = &*entrypoints_with_issues_op
                     .read_strongly_consistent()
                     .await?;
 
-                effects.apply().await?;
-                Ok((entrypoints.clone(), issues.clone(), diagnostics.clone()))
+                let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+                let issues = extend_issues(issues, &effect_plain_issues);
+                Ok((entrypoints.clone(), issues, diagnostics.clone()))
             }
             .instrument(tracing::info_span!("entrypoints subscription"))
         },
@@ -1826,9 +1839,10 @@ pub fn project_entrypoints_subscribe(
 #[turbo_tasks::value(serialization = "skip")]
 struct HmrUpdateWithIssues {
     update: ReadRef<Update>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[turbo_tasks::function(operation)]
@@ -1854,11 +1868,13 @@ async fn hmr_update_with_issues_operation(
     let issues = get_issues(update_op, filter).await?;
     let diagnostics = get_diagnostics(update_op).await?;
     let effects = Arc::new(take_effects(update_op).await?);
+    let filter = filter.to_resolved().await?;
     Ok(HmrUpdateWithIssues {
         update,
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -1907,12 +1923,15 @@ pub fn project_hmr_events(
                         issues,
                         diagnostics,
                         effects,
+                        filter,
                     } = &*update;
                     // HACK(bgw): Remove this mark call
                     mark_top_level_task();
-                    effects.apply().await?;
+                    let effect_plain_issues =
+                        apply_effects_with_plain_issues(effects, *filter).await?;
                     // HACK(bgw): Remove this unmark call
                     unmark_top_level_task_may_leak_eventually_consistent_state();
+                    let issues = extend_issues(issues, &effect_plain_issues);
                     match &**update {
                         Update::Missing | Update::None => {}
                         Update::Total(TotalUpdate { to }) => {
@@ -1922,7 +1941,7 @@ pub fn project_hmr_events(
                             state.set(to.clone()).await?;
                         }
                     }
-                    Ok((Some(update.clone()), issues.clone(), diagnostics.clone()))
+                    Ok((Some(update.clone()), issues, diagnostics.clone()))
                 }
             }
         },
@@ -1935,7 +1954,7 @@ pub fn project_hmr_events(
                 .collect();
             let update_issues = issues
                 .iter()
-                .map(|issue| Issue::from(&**issue))
+                .map(|issue| HmrIssue::from(&**issue))
                 .collect::<Vec<_>>();
 
             let identifier = ResourceIdentifier {
@@ -1971,9 +1990,10 @@ struct HmrChunkNames {
 #[turbo_tasks::value(serialization = "skip")]
 struct HmrChunkNamesWithIssues {
     chunk_names: ReadRef<Vec<RcStr>>,
-    issues: Arc<Vec<ReadRef<PlainIssue>>>,
-    diagnostics: Arc<Vec<ReadRef<PlainDiagnostic>>>,
+    issues: Arc<[ReadRef<PlainIssue>]>,
+    diagnostics: Arc<[ReadRef<PlainDiagnostic>]>,
     effects: Arc<Effects>,
+    filter: ResolvedVc<IssueFilter>,
 }
 
 #[turbo_tasks::function(operation)]
@@ -1991,15 +2011,17 @@ async fn get_hmr_chunk_names_with_issues_operation(
 ) -> Result<Vc<HmrChunkNamesWithIssues>> {
     let hmr_chunk_names_op = project_hmr_chunk_names_operation(container, target);
     let hmr_chunk_names = hmr_chunk_names_op.read_strongly_consistent().await?;
-    let filter = issue_filter_from_container(container);
+    let filter = container.project().issue_filter();
     let issues = get_issues(hmr_chunk_names_op, filter).await?;
     let diagnostics = get_diagnostics(hmr_chunk_names_op).await?;
     let effects = Arc::new(take_effects(hmr_chunk_names_op).await?);
+    let filter = filter.to_resolved().await?;
     Ok(HmrChunkNamesWithIssues {
         chunk_names: hmr_chunk_names,
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -2027,12 +2049,14 @@ pub fn project_hmr_chunk_names_subscribe(
                 issues,
                 diagnostics,
                 effects,
+                filter,
             } = &*hmr_chunk_names_with_issues_op
                 .read_strongly_consistent()
                 .await?;
-            effects.apply().await?;
+            let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+            let issues = extend_issues(issues, &effect_plain_issues);
 
-            Ok((chunk_names.clone(), issues.clone(), diagnostics.clone()))
+            Ok((chunk_names.clone(), issues, diagnostics.clone()))
         },
         move |ctx| {
             let (chunk_names, issues, diagnostics) = ctx.value;
@@ -2508,11 +2532,13 @@ pub async fn project_write_analyze_data(
                 issues,
                 diagnostics,
                 effects,
+                filter,
             } = &*analyze_data_op.read_strongly_consistent().await?;
 
             // Write the files to disk
-            effects.apply().await?;
-            Ok((issues.clone(), diagnostics.clone()))
+            let effect_plain_issues = apply_effects_with_plain_issues(effects, *filter).await?;
+            let issues = extend_issues(issues, &effect_plain_issues);
+            Ok((issues, diagnostics.clone()))
         })
         .await
         .map_err(|e| napi::Error::from_reason(PrettyPrintError(&e).to_string()))?;
@@ -2549,13 +2575,15 @@ async fn get_all_compilation_issues_operation(
     container: ResolvedVc<ProjectContainer>,
 ) -> Result<Vc<OperationResult>> {
     let inner_op = get_all_compilation_issues_inner_operation(container);
-    let filter = issue_filter_from_container(container);
+    let filter = container.project().issue_filter();
     let (_, issues, diagnostics, effects) =
         strongly_consistent_catch_collectables(inner_op, filter).await?;
+    let filter = filter.to_resolved().await?;
     Ok(OperationResult {
         issues,
         diagnostics,
         effects,
+        filter,
     }
     .cell())
 }
@@ -2575,6 +2603,7 @@ pub async fn project_get_all_compilation_issues(
                 issues,
                 diagnostics,
                 effects: _,
+                filter: _,
             } = &*op.read_strongly_consistent().await?;
             Ok((issues.clone(), diagnostics.clone()))
         })
