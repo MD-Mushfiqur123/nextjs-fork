@@ -482,6 +482,7 @@ async function exportAppImpl(
     distDir,
     basePath: nextConfig.basePath,
     cacheComponents: nextConfig.cacheComponents ?? false,
+    validationLevel: nextConfig.experimental.instantInsights.validationLevel,
     trailingSlash: nextConfig.trailingSlash,
     locales: i18n?.locales,
     locale: i18n?.defaultLocale,
@@ -750,6 +751,10 @@ async function exportAppImpl(
         initialPhaseExportPaths.push(exportPath)
       }
 
+      // Always mark routes for potential build validation. The actual
+      // decision of whether to validate is made per-route by
+      // anySegmentNeedsInstantValidationInBuild, which checks both the
+      // default validation level and per-segment level overrides.
       const route = exportPath.page
       if (!routesWithInstantValidation.has(route)) {
         exportPath._runInstantValidation = true
