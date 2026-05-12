@@ -977,7 +977,8 @@ async function generateStagedDynamicFlightRenderResultWeb(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    shouldTrackSyncIO
+    shouldTrackSyncIO,
+    true // has fallbacks
   )
 
   // Initialize stale time tracking on the request store.
@@ -1145,7 +1146,8 @@ async function generateStagedDynamicFlightRenderResultNode(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    shouldTrackSyncIO
+    shouldTrackSyncIO,
+    true // has fallbacks
   )
 
   // Initialize stale time tracking on the request store.
@@ -1343,7 +1345,8 @@ async function stagedRenderWithoutCachesInDevWeb(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    false // do not track sync IO (we don't have reliable stages)
+    false, // do not track sync IO (we don't have reliable stages)
+    false // no fallbacks (because there's no validation here)
   )
 
   const environmentName = () => {
@@ -1400,7 +1403,8 @@ async function stagedRenderWithoutCachesInDevNode(
   const stageController = new StagedRenderingController(
     null, // no aborting
     null, // no abandoning
-    false // do not track sync IO (we don't have reliable stages)
+    false, // do not track sync IO (we don't have reliable stages)
+    false // no fallbacks (because there's no validation here)
   )
 
   const environmentName = () => {
@@ -1954,7 +1958,8 @@ async function finalRuntimeServerPrerender(
   const finalStageController = new StagedRenderingController(
     finalServerController.signal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    true // has fallbacks
   )
   // finalStageController.debug = true // DEBUG
 
@@ -3880,7 +3885,8 @@ async function renderToStream(
           const stageController = new StagedRenderingController(
             null, // no aborting
             null, // no abandoning
-            shouldTrackSyncIO
+            shouldTrackSyncIO,
+            true // has fallbacks
           )
 
           requestStore.stale = INFINITE_CACHE
@@ -4026,7 +4032,8 @@ async function renderToStream(
           const stageController = new StagedRenderingController(
             null, // no aborting
             null, // no abandoning
-            shouldTrackSyncIO
+            shouldTrackSyncIO,
+            true // has fallbacks
           )
           // stageController.debug = true // DEBUG
 
@@ -4839,7 +4846,9 @@ async function renderWithRestartOnCacheMissInDevWeb(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
@@ -5003,7 +5012,9 @@ async function renderWithRestartOnCacheMissInDevWeb(
   const finalStageController = new StagedRenderingController(
     abortSignal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   // We've filled the caches, so now we can render as usual,
@@ -5162,7 +5173,9 @@ async function renderWithRestartOnCacheMissInDevNode(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO,
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
@@ -5321,7 +5334,9 @@ async function renderWithRestartOnCacheMissInDevNode(
   const finalStageController = new StagedRenderingController(
     abortSignal,
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   // We've filled the caches, so now we can render as usual,
@@ -6743,7 +6758,9 @@ async function renderWithRestartOnCacheMissInValidation(
   const initialStageController = new StagedRenderingController(
     initialDataController.signal,
     initialAbandonController,
-    true // track sync IO
+    true, // track sync IO
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
@@ -6854,7 +6871,9 @@ async function renderWithRestartOnCacheMissInValidation(
   const finalStageController = new StagedRenderingController(
     finalDataController.signal, // abortable
     null, // no abandoning
-    true // track sync IO
+    true, // track sync IO
+    // TODO(fallback-stage): implement validation
+    false // no fallbacks
   )
 
   requestStore.prerenderResumeDataCache = null
