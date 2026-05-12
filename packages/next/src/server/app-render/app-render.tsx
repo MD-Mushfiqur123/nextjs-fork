@@ -4850,6 +4850,7 @@ async function renderWithRestartOnCacheMissInDevWeb(
     // TODO(fallback-stage): implement validation
     false // no fallbacks
   )
+  // initialStageController.debug = true
 
   requestStore.prerenderResumeDataCache = prerenderResumeDataCache
   // `getRenderResumeDataCache` will fall back to using `prerenderResumeDataCache` as `renderResumeDataCache`,
@@ -5016,6 +5017,7 @@ async function renderWithRestartOnCacheMissInDevWeb(
     // TODO(fallback-stage): implement validation
     false // no fallbacks
   )
+  // finalStageController.debug = true
 
   // We've filled the caches, so now we can render as usual,
   // without any cache-filling mechanics.
@@ -5667,35 +5669,30 @@ function createAsyncApiPromises(
   mutableCookies: RequestStore['mutableCookies'],
   headers: RequestStore['headers']
 ): NonNullable<RequestStore['asyncApiPromises']> {
+  const [EARLY_RUNTIME, LATE_RUNTIME] = stagedRendering.hasFallbacks
+    ? ([RenderStage.FallbackEarlyRuntime, RenderStage.FallbackRuntime] as const)
+    : ([RenderStage.EarlyRuntime, RenderStage.Runtime] as const)
   return {
     // Runtime APIs (for prefetch segments)
-    cookies: stagedRendering.delayUntilStage(
-      RenderStage.FallbackRuntime,
-      'cookies',
-      cookies
-    ),
+    cookies: stagedRendering.delayUntilStage(LATE_RUNTIME, 'cookies', cookies),
     earlyCookies: stagedRendering.delayUntilStage(
-      RenderStage.FallbackEarlyRuntime,
+      EARLY_RUNTIME,
       'cookies',
       cookies
     ),
     mutableCookies: stagedRendering.delayUntilStage(
-      RenderStage.FallbackRuntime,
+      LATE_RUNTIME,
       'cookies',
       mutableCookies as RequestStore['cookies']
     ),
     earlyMutableCookies: stagedRendering.delayUntilStage(
-      RenderStage.FallbackEarlyRuntime,
+      EARLY_RUNTIME,
       'cookies',
       mutableCookies as RequestStore['cookies']
     ),
-    headers: stagedRendering.delayUntilStage(
-      RenderStage.FallbackRuntime,
-      'headers',
-      headers
-    ),
+    headers: stagedRendering.delayUntilStage(LATE_RUNTIME, 'headers', headers),
     earlyHeaders: stagedRendering.delayUntilStage(
-      RenderStage.FallbackEarlyRuntime,
+      EARLY_RUNTIME,
       'headers',
       headers
     ),
